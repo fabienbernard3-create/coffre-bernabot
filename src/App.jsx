@@ -108,6 +108,13 @@ export default function App() {
   const [showShare, setShowShare] = useState(false);
   const [syncStatus, setSyncStatus] = useState('idle');
   const [showSettings, setShowSettings] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterCategory, setFilterCategory] = useState('Toutes');
+  const [showChangePassword, setShowChangePassword] = useState(false);
+  const [oldPasswordCheck, setOldPasswordCheck] = useState('');
+  const [newMasterPwd, setNewMasterPwd] = useState('');
+  const [confirmNewMasterPwd, setConfirmNewMasterPwd] = useState('');
+  const [changePwdError, setChangePwdError] = useState('');
   const syncTimeout = useRef(null);
 
   useEffect(() => {
@@ -210,18 +217,20 @@ export default function App() {
     setSyncStatus('error');
   };
 
-  const saveData = async (newIdentifiants, newCategories) => {
+  const saveData = async (newIdentifiants, newCategories, customPwd) => {
+    const pwd = customPwd || masterPassword;
     const saved = localStorage.getItem('coffreBernabot');
-    const parsed = saved ? JSON.parse(saved) : { masterPassword };
+    const parsed = saved ? JSON.parse(saved) : { masterPassword: pwd };
     parsed.identifiants = newIdentifiants;
     parsed.categories = newCategories;
     parsed.shareId = shareId;
+    if (customPwd) parsed.masterPassword = customPwd;
     localStorage.setItem('coffreBernabot', JSON.stringify(parsed));
     if (syncTimeout.current) clearTimeout(syncTimeout.current);
     syncTimeout.current = setTimeout(async () => {
       setSyncStatus('syncing');
       const payload = { identifiants: newIdentifiants, categories: newCategories };
-      const encrypted = await encryptData(JSON.stringify(payload), masterPassword);
+      const encrypted = await encryptData(JSON.stringify(payload), pwd);
       const ok = await saveToSupabase(shareId, { payload: encrypted });
       setSyncStatus(ok ? 'ok' : 'error');
     }, 500);
@@ -271,6 +280,58 @@ export default function App() {
   };
 
   const handleLogout = () => { setStage('auth'); setMasterPassword(''); setIdentifiants([]); setShowSettings(false); };
+
+  const handleChangePassword = async () => {
+    setChangePwdError('');
+    if (oldPasswordCheck !== masterPassword) { setChangePwdError('Ancien mot de passe incorrect'); return; }
+    if (newMasterPwd.length < 6) { setChangePwdError('Nouveau mot de passe : min 6 caractères'); return; }
+    if (newMasterPwd !== confirmNewMasterPwd) { setChangePwdError('Les nouveaux mots de passe ne correspondent pas'); return; }
+    // Re-chiffrer avec le nouveau mot de passe
+    setSyncStatus('syncing');
+    const payload = { identifiants, categories };
+    const encrypted = await encryptData(JSON.stringify(payload), newMasterPwd);
+    const ok = await saveToSupabase(shareId, { payload: encrypted });
+    if (ok) {
+      // Mettre à jour le local
+      const saved = localStorage.getItem('coffreBernabot');
+      const parsed = JSON.parse(saved);
+      parsed.masterPassword = newMasterPwd;
+      localStorage.setItem('coffreBernabot', JSON.stringify(parsed));
+      setMasterPassword(newMasterPwd);
+      setSyncStatus('ok');
+      alert('Mot de passe changé avec succès ! Julie devra utiliser le nouveau mot de passe.');
+      setShowChangePassword(false);
+      setOldPasswordCheck('');
+      setNewMasterPwd('');
+      setConfirmNewMasterPwd('');
+    } else {
+      setChangePwdError('Erreur lors du changement. Réessaie.');
+      setSyncStatus('error');
+    }
+  };
+
+  const handleExport = async () => {
+    const data = { identifiants, categories, exportedAt: new Date().toISOString(), shareId };
+    const encrypted = await encryptData(JSON.stringify(data), masterPassword);
+    const blob = new Blob([encrypted], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `coffre-bernabot-backup-${new Date().toISOString().split('T')[0]}.enc`;
+    a.click();
+    URL.revokeObjectURL(url);
+    alert('Backup téléchargé ! Garde-le en lieu sûr.');
+  };
+
+  // Filtrer les identifiants
+  const filteredIdentifiants = identifiants.filter(item => {
+    const matchSearch = !searchQuery || 
+      item.site.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      item.username.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (item.notes || '').toLowerCase().includes(searchQuery.toLowerCase());
+    const matchCategory = filterCategory === 'Toutes' || item.category === filterCategory;
+    return matchSearch && matchCategory;
+  });
 
   if (stage === 'loading') {
     return <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg,#667eea,#764ba2)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontFamily: 'system-ui' }}>Chargement...</div>;
@@ -343,6 +404,27 @@ export default function App() {
             <p style={{ margin: '12px 0 0', fontSize: '11px', color: '#718096' }}>Julie ouvre ce lien et entre le mot de passe maître</p>
           </div>
         )}
+
+        {/* BARRE DE RECHERCHE */}
+        {identifiants.length > 0 && (
+          <div style={{ background: 'white', borderRadius: '12px', padding: '12px', marginBottom: '16px', border: '1px solid #e2e8f0', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+            <input 
+              placeholder="🔍 Rechercher..." 
+              value={searchQuery} 
+              onChange={e => setSearchQuery(e.target.value)}
+              style={{ flex: 1, minWidth: '150px', padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }}
+            />
+            <select 
+              value={filterCategory} 
+              onChange={e => setFilterCategory(e.target.value)}
+              style={{ padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', background: 'white', cursor: 'pointer' }}
+            >
+              <option value="Toutes">Toutes catégories</option>
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </div>
+        )}
+
         {!showForm ? (
           <button onClick={() => { setShowForm(true); setFormData({ site: '', username: '', password: '', category: 'Autres', notes: '' }); setEditingId(null); }} style={{ width: '100%', padding: '12px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', marginBottom: '20px', fontSize: '14px' }}>+ Ajouter un identifiant</button>
         ) : (
@@ -372,11 +454,14 @@ export default function App() {
             </div>
           </div>
         )}
+
         {identifiants.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 20px', color: '#718096' }}><div style={{ fontSize: '48px', marginBottom: '12px' }}>🔒</div><p>Aucun identifiant</p></div>
+        ) : filteredIdentifiants.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px 20px', color: '#718096' }}><div style={{ fontSize: '32px', marginBottom: '12px' }}>🔍</div><p>Aucun résultat</p></div>
         ) : (
           <div style={{ display: 'grid', gap: '12px' }}>
-            {identifiants.map(item => (
+            {filteredIdentifiants.map(item => (
               <div key={item.id} style={{ background: 'white', borderRadius: '12px', padding: '16px', border: '1px solid #e2e8f0' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start', marginBottom: '12px' }}>
                   <div style={{ flex: 1 }}>
@@ -400,15 +485,51 @@ export default function App() {
           </div>
         )}
       </div>
-      {showSettings && (
+
+      {/* PARAMÈTRES AMÉLIORÉS */}
+      {showSettings && !showChangePassword && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => setShowSettings(false)}>
           <div style={{ background: 'white', borderRadius: '16px', padding: '30px', maxWidth: '400px', width: '90%' }} onClick={e => e.stopPropagation()}>
             <h2 style={{ margin: '0 0 20px', fontSize: '18px', fontWeight: 700 }}>⚙️ Paramètres</h2>
             <p style={{ margin: '0 0 8px', fontSize: '13px', color: '#718096' }}><strong>Identifiants :</strong> {identifiants.length}</p>
             <p style={{ margin: '0 0 8px', fontSize: '13px', color: '#718096' }}><strong>Catégories :</strong> {categories.length}</p>
             <p style={{ margin: '0 0 20px', fontSize: '11px', color: '#a0aec0', wordBreak: 'break-all' }}><strong>Share ID :</strong> {shareId}</p>
-            <button onClick={() => syncFromRemote(shareId, masterPassword)} style={{ width: '100%', padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500 }}>🔄 Forcer la synchronisation</button>
-            <button onClick={() => setShowSettings(false)} style={{ width: '100%', padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600 }}>Fermer</button>
+            
+            <button onClick={() => syncFromRemote(shareId, masterPassword)} style={{ width: '100%', padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500 }}>
+              🔄 Forcer la synchronisation
+            </button>
+            
+            <button onClick={handleExport} style={{ width: '100%', padding: '10px', background: '#e6fffa', border: '1px solid #38b2ac', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500, color: '#234e52' }}>
+              💾 Exporter (backup chiffré)
+            </button>
+            
+            <button onClick={() => setShowChangePassword(true)} style={{ width: '100%', padding: '10px', background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500, color: '#78350f' }}>
+              🔑 Changer le mot de passe maître
+            </button>
+            
+            <button onClick={() => setShowSettings(false)} style={{ width: '100%', padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, marginTop: '8px' }}>
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* CHANGEMENT MOT DE PASSE */}
+      {showChangePassword && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => { setShowChangePassword(false); setChangePwdError(''); }}>
+          <div style={{ background: 'white', borderRadius: '16px', padding: '30px', maxWidth: '400px', width: '90%' }} onClick={e => e.stopPropagation()}>
+            <h2 style={{ margin: '0 0 20px', fontSize: '18px', fontWeight: 700 }}>🔑 Changer le mot de passe</h2>
+            <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '8px', padding: '12px', marginBottom: '16px', fontSize: '12px', color: '#78350f' }}>
+              ⚠️ Julie devra aussi utiliser le nouveau mot de passe pour accéder au coffre.
+            </div>
+            <input type="password" placeholder="Ancien mot de passe" value={oldPasswordCheck} onChange={e => setOldPasswordCheck(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '10px', fontSize: '13px', boxSizing: 'border-box' }} />
+            <input type="password" placeholder="Nouveau mot de passe (min 6)" value={newMasterPwd} onChange={e => setNewMasterPwd(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '10px', fontSize: '13px', boxSizing: 'border-box' }} />
+            <input type="password" placeholder="Confirmer le nouveau" value={confirmNewMasterPwd} onChange={e => setConfirmNewMasterPwd(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '12px', fontSize: '13px', boxSizing: 'border-box' }} />
+            {changePwdError && <p style={{ color: '#f56565', fontSize: '12px', marginBottom: '12px' }}>{changePwdError}</p>}
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={handleChangePassword} style={{ flex: 1, padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px' }}>Valider</button>
+              <button onClick={() => { setShowChangePassword(false); setOldPasswordCheck(''); setNewMasterPwd(''); setConfirmNewMasterPwd(''); setChangePwdError(''); }} style={{ flex: 1, padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>Annuler</button>
+            </div>
           </div>
         </div>
       )}
