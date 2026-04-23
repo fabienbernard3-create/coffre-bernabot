@@ -71,7 +71,7 @@ async function saveToSupabase(shareId, data) {
 
 async function loadFromSupabase(shareId) {
   try {
-    const result = await supabaseFetch(`/coffres?id=eq.${shareId}&select=*`);
+    const result = await supabaseFetch(`/coffres?id=eq.${encodeURIComponent(shareId)}&select=*`);
     if (result && result.length > 0) return result[0].data;
     return null;
   } catch (e) {
@@ -80,18 +80,34 @@ async function loadFromSupabase(shareId) {
   }
 }
 
+async function coffreExists(shareId) {
+  try {
+    const result = await supabaseFetch(`/coffres?id=eq.${encodeURIComponent(shareId)}&select=id`);
+    return result && result.length > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
 function getShareIdFromUrl() {
   const params = new URLSearchParams(window.location.search);
   return params.get('share');
 }
 
+// Sanitize custom ID: lowercase, letters, numbers, hyphens
+function sanitizeId(id) {
+  return id.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
+
 export default function App() {
   const [stage, setStage] = useState('loading');
+  const [authMode, setAuthMode] = useState('choice'); // choice, create, access
   const [masterPassword, setMasterPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [newCoffreId, setNewCoffreId] = useState('');
+  const [accessCoffreId, setAccessCoffreId] = useState('');
   const [hasLocalCoffre, setHasLocalCoffre] = useState(false);
-  const [hasSharedCoffre, setHasSharedCoffre] = useState(false);
   const [identifiants, setIdentifiants] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -115,6 +131,9 @@ export default function App() {
   const [newMasterPwd, setNewMasterPwd] = useState('');
   const [confirmNewMasterPwd, setConfirmNewMasterPwd] = useState('');
   const [changePwdError, setChangePwdError] = useState('');
+  const [showRenameCoffre, setShowRenameCoffre] = useState(false);
+  const [newCoffreIdRename, setNewCoffreIdRename] = useState('');
+  const [renameError, setRenameError] = useState('');
   const syncTimeout = useRef(null);
 
   useEffect(() => {
@@ -122,7 +141,8 @@ export default function App() {
     const saved = localStorage.getItem('coffreBernabot');
     if (urlShareId) {
       setShareId(urlShareId);
-      setHasSharedCoffre(true);
+      setAccessCoffreId(urlShareId);
+      setAuthMode('access');
       setHasLocalCoffre(!!saved);
     } else if (saved) {
       try {
@@ -130,7 +150,13 @@ export default function App() {
         setShareId(parsed.shareId);
         setHasLocalCoffre(true);
         setCategories(parsed.categories || DEFAULT_CATEGORIES);
-      } catch (e) {}
+        setAuthMode('access');
+        setAccessCoffreId(parsed.shareId);
+      } catch (e) {
+        setAuthMode('choice');
+      }
+    } else {
+      setAuthMode('choice');
     }
     setStage('auth');
   }, []);
@@ -139,57 +165,65 @@ export default function App() {
 
   const handleCreateCoffre = async () => {
     if (!newPassword || newPassword !== confirmPassword) { alert('Les mots de passe ne correspondent pas'); return; }
-    if (newPassword.length < 6) { alert('Minimum 6 caractères'); return; }
-    const newShareId = generateShareId();
-    const coffreData = { masterPassword: newPassword, identifiants: [], categories: DEFAULT_CATEGORIES, shareId: newShareId, createdAt: new Date().toISOString() };
+    if (newPassword.length < 6) { alert('Mot de passe : min 6 caractères'); return; }
+    
+    let finalId;
+    if (newCoffreId.trim()) {
+      finalId = sanitizeId(newCoffreId);
+      if (finalId.length < 3) { alert('ID coffre : min 3 caractères (lettres, chiffres, tirets)'); return; }
+      // Vérifier que l'ID n'existe pas déjà
+      const exists = await coffreExists(finalId);
+      if (exists) { alert(`Un coffre avec l'ID "${finalId}" existe déjà. Choisis un autre ID.`); return; }
+    } else {
+      finalId = generateShareId();
+    }
+    
+    const coffreData = { masterPassword: newPassword, identifiants: [], categories: DEFAULT_CATEGORIES, shareId: finalId, createdAt: new Date().toISOString() };
     localStorage.setItem('coffreBernabot', JSON.stringify(coffreData));
     setSyncStatus('syncing');
     const encryptedPayload = await encryptData(JSON.stringify({ identifiants: [], categories: DEFAULT_CATEGORIES }), newPassword);
-    const ok = await saveToSupabase(newShareId, { payload: encryptedPayload });
+    const ok = await saveToSupabase(finalId, { payload: encryptedPayload });
     setSyncStatus(ok ? 'ok' : 'error');
     setMasterPassword(newPassword);
     setHasLocalCoffre(true);
-    setShareId(newShareId);
+    setShareId(finalId);
     setNewPassword('');
     setConfirmPassword('');
+    setNewCoffreId('');
     setStage('coffre');
   };
 
   const handleAccessCoffre = async () => {
     if (!passwordInput) { setAccessError('Entrez le mot de passe'); return; }
-    if (hasSharedCoffre && shareId) {
-      setSyncStatus('syncing');
-      const remoteData = await loadFromSupabase(shareId);
-      if (!remoteData || !remoteData.payload) { setAccessError('Coffre introuvable'); setSyncStatus('error'); return; }
-      const decrypted = await decryptData(remoteData.payload, passwordInput);
-      if (!decrypted) { setAccessError('Mot de passe incorrect'); setSyncStatus('error'); return; }
-      try {
-        const data = JSON.parse(decrypted);
-        setIdentifiants(data.identifiants || []);
-        setCategories(data.categories || DEFAULT_CATEGORIES);
-        localStorage.setItem('coffreBernabot', JSON.stringify({ masterPassword: passwordInput, identifiants: data.identifiants || [], categories: data.categories || DEFAULT_CATEGORIES, shareId: shareId, createdAt: new Date().toISOString() }));
-        setMasterPassword(passwordInput);
-        setStage('coffre');
-        setAccessError('');
-        setPasswordInput('');
-        setSyncStatus('ok');
-      } catch (e) { setAccessError('Erreur lecture'); setSyncStatus('error'); }
-      return;
-    }
-    const saved = localStorage.getItem('coffreBernabot');
-    if (!saved) { setAccessError('Aucun coffre'); return; }
+    if (!accessCoffreId.trim()) { setAccessError('Entrez l\'ID du coffre'); return; }
+    
+    const targetId = accessCoffreId.trim();
+    setSyncStatus('syncing');
+    const remoteData = await loadFromSupabase(targetId);
+    if (!remoteData || !remoteData.payload) { setAccessError('Coffre introuvable avec cet ID'); setSyncStatus('error'); return; }
+    
+    const decrypted = await decryptData(remoteData.payload, passwordInput);
+    if (!decrypted) { setAccessError('Mot de passe incorrect'); setSyncStatus('error'); return; }
+    
     try {
-      const parsed = JSON.parse(saved);
-      if (parsed.masterPassword !== passwordInput) { setAccessError('Mot de passe incorrect'); return; }
+      const data = JSON.parse(decrypted);
+      setIdentifiants(data.identifiants || []);
+      setCategories(data.categories || DEFAULT_CATEGORIES);
+      localStorage.setItem('coffreBernabot', JSON.stringify({
+        masterPassword: passwordInput,
+        identifiants: data.identifiants || [],
+        categories: data.categories || DEFAULT_CATEGORIES,
+        shareId: targetId,
+        createdAt: new Date().toISOString()
+      }));
       setMasterPassword(passwordInput);
-      setCategories(parsed.categories || DEFAULT_CATEGORIES);
-      setShareId(parsed.shareId);
-      setIdentifiants(parsed.identifiants || []);
+      setShareId(targetId);
+      setHasLocalCoffre(true);
       setStage('coffre');
       setAccessError('');
       setPasswordInput('');
-      if (parsed.shareId) syncFromRemote(parsed.shareId, passwordInput);
-    } catch (e) { setAccessError('Erreur'); }
+      setSyncStatus('ok');
+    } catch (e) { setAccessError('Erreur lecture'); setSyncStatus('error'); }
   };
 
   const syncFromRemote = async (sid, pwd) => {
@@ -279,33 +313,74 @@ export default function App() {
     setShowNewCategory(false);
   };
 
-  const handleLogout = () => { setStage('auth'); setMasterPassword(''); setIdentifiants([]); setShowSettings(false); };
+  const handleLogout = () => {
+    setStage('auth');
+    setAuthMode('choice');
+    setMasterPassword('');
+    setIdentifiants([]);
+    setShowSettings(false);
+    // On garde hasLocalCoffre à true pour proposer "Accéder" par défaut
+  };
 
   const handleChangePassword = async () => {
     setChangePwdError('');
     if (oldPasswordCheck !== masterPassword) { setChangePwdError('Ancien mot de passe incorrect'); return; }
-    if (newMasterPwd.length < 6) { setChangePwdError('Nouveau mot de passe : min 6 caractères'); return; }
+    if (newMasterPwd.length < 6) { setChangePwdError('Nouveau : min 6 caractères'); return; }
     if (newMasterPwd !== confirmNewMasterPwd) { setChangePwdError('Les nouveaux mots de passe ne correspondent pas'); return; }
-    // Re-chiffrer avec le nouveau mot de passe
     setSyncStatus('syncing');
     const payload = { identifiants, categories };
     const encrypted = await encryptData(JSON.stringify(payload), newMasterPwd);
     const ok = await saveToSupabase(shareId, { payload: encrypted });
     if (ok) {
-      // Mettre à jour le local
       const saved = localStorage.getItem('coffreBernabot');
       const parsed = JSON.parse(saved);
       parsed.masterPassword = newMasterPwd;
       localStorage.setItem('coffreBernabot', JSON.stringify(parsed));
       setMasterPassword(newMasterPwd);
       setSyncStatus('ok');
-      alert('Mot de passe changé avec succès ! Julie devra utiliser le nouveau mot de passe.');
+      alert('Mot de passe changé ! Julie devra utiliser le nouveau mot de passe.');
       setShowChangePassword(false);
-      setOldPasswordCheck('');
-      setNewMasterPwd('');
-      setConfirmNewMasterPwd('');
+      setOldPasswordCheck(''); setNewMasterPwd(''); setConfirmNewMasterPwd('');
     } else {
-      setChangePwdError('Erreur lors du changement. Réessaie.');
+      setChangePwdError('Erreur. Réessaie.');
+      setSyncStatus('error');
+    }
+  };
+
+  const handleRenameCoffre = async () => {
+    setRenameError('');
+    const newId = sanitizeId(newCoffreIdRename);
+    if (newId.length < 3) { setRenameError('Min 3 caractères (lettres, chiffres, tirets)'); return; }
+    if (newId === shareId) { setRenameError('C\'est déjà l\'ID actuel'); return; }
+    
+    // Vérifier que le nouvel ID n'existe pas
+    const exists = await coffreExists(newId);
+    if (exists) { setRenameError(`L'ID "${newId}" est déjà utilisé.`); return; }
+    
+    setSyncStatus('syncing');
+    // 1. Créer le nouveau coffre avec le nouvel ID
+    const payload = { identifiants, categories };
+    const encrypted = await encryptData(JSON.stringify(payload), masterPassword);
+    const ok = await saveToSupabase(newId, { payload: encrypted });
+    
+    if (ok) {
+      // 2. Supprimer l'ancien
+      try {
+        await supabaseFetch(`/coffres?id=eq.${encodeURIComponent(shareId)}`, { method: 'DELETE' });
+      } catch (e) { console.error('Erreur suppression ancien:', e); }
+      
+      // 3. Mettre à jour le local
+      const saved = localStorage.getItem('coffreBernabot');
+      const parsed = JSON.parse(saved);
+      parsed.shareId = newId;
+      localStorage.setItem('coffreBernabot', JSON.stringify(parsed));
+      setShareId(newId);
+      setSyncStatus('ok');
+      alert(`Coffre renommé en "${newId}" ! Préviens Julie du nouvel ID.`);
+      setShowRenameCoffre(false);
+      setNewCoffreIdRename('');
+    } else {
+      setRenameError('Erreur lors du renommage');
       setSyncStatus('error');
     }
   };
@@ -317,13 +392,12 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `coffre-bernabot-backup-${new Date().toISOString().split('T')[0]}.enc`;
+    a.download = `coffre-${shareId}-backup-${new Date().toISOString().split('T')[0]}.enc`;
     a.click();
     URL.revokeObjectURL(url);
-    alert('Backup téléchargé ! Garde-le en lieu sûr.');
+    alert('Backup téléchargé !');
   };
 
-  // Filtrer les identifiants
   const filteredIdentifiants = identifiants.filter(item => {
     const matchSearch = !searchQuery || 
       item.site.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -338,38 +412,65 @@ export default function App() {
   }
 
   if (stage === 'auth') {
-    const isNewUser = !hasLocalCoffre && !hasSharedCoffre;
     return (
       <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg,#667eea,#764ba2)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', fontFamily: 'system-ui' }}>
-        <div style={{ background: 'white', borderRadius: '16px', padding: '40px', width: '100%', maxWidth: '400px', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+        <div style={{ background: 'white', borderRadius: '16px', padding: '40px', width: '100%', maxWidth: '420px', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
           <div style={{ textAlign: 'center', marginBottom: '30px' }}>
             <div style={{ fontSize: '48px', marginBottom: '12px' }}>🔐</div>
             <h1 style={{ margin: '0 0 8px', fontSize: '24px', fontWeight: 700, color: '#1a202c' }}>Coffre Bernabot</h1>
             <p style={{ margin: '0', fontSize: '13px', color: '#718096' }}>Chiffré AES-256 · Sync temps réel</p>
           </div>
-          {hasSharedCoffre && <div style={{ background: '#e6fffa', border: '1px solid #38b2ac', borderRadius: '8px', padding: '12px', marginBottom: '20px', fontSize: '12px', color: '#234e52' }}>📱 Coffre partagé. Entrez le mot de passe maître.</div>}
-          {isNewUser ? (
+
+          {authMode === 'choice' && (
             <>
-              <h2 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '20px', color: '#2d3748' }}>Créer un coffre</h2>
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-                <input type={showPassword ? 'text' : 'password'} placeholder="Mot de passe maître" value={newPassword} onChange={e => setNewPassword(e.target.value)} style={{ flex: 1, padding: '12px', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' }} />
-                <button onClick={() => setShowPassword(!showPassword)} style={{ padding: '12px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer' }}>{showPassword ? '👁️' : '🔒'}</button>
+              <button onClick={() => setAuthMode('access')} style={{ width: '100%', padding: '14px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', fontSize: '14px', marginBottom: '12px' }}>
+                📂 Accéder à un coffre existant
+              </button>
+              <button onClick={() => setAuthMode('create')} style={{ width: '100%', padding: '14px', background: '#edf2f7', color: '#2d3748', border: '1px solid #e2e8f0', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', fontSize: '14px' }}>
+                ✨ Créer un nouveau coffre
+              </button>
+            </>
+          )}
+
+          {authMode === 'create' && (
+            <>
+              <h2 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '16px', color: '#2d3748' }}>✨ Créer un coffre</h2>
+              <label style={{ display: 'block', fontSize: '12px', color: '#4a5568', marginBottom: '4px', fontWeight: 500 }}>ID du coffre (optionnel)</label>
+              <input placeholder="ex: bernabot-famille" value={newCoffreId} onChange={e => setNewCoffreId(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '13px', boxSizing: 'border-box', marginBottom: '4px' }} />
+              <p style={{ margin: '0 0 12px', fontSize: '11px', color: '#a0aec0' }}>Laisse vide pour un ID auto. Lettres, chiffres, tirets.</p>
+              
+              <label style={{ display: 'block', fontSize: '12px', color: '#4a5568', marginBottom: '4px', fontWeight: 500 }}>Mot de passe maître</label>
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+                <input type={showPassword ? 'text' : 'password'} placeholder="Min 6 caractères" value={newPassword} onChange={e => setNewPassword(e.target.value)} style={{ flex: 1, padding: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '13px', boxSizing: 'border-box' }} />
+                <button onClick={() => setShowPassword(!showPassword)} style={{ padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer' }}>{showPassword ? '👁️' : '🔒'}</button>
               </div>
               <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
-                <input type={showPassword ? 'text' : 'password'} placeholder="Confirmer" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} style={{ flex: 1, padding: '12px', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' }} />
-                <button onClick={() => setShowPassword(!showPassword)} style={{ padding: '12px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer' }}>{showPassword ? '👁️' : '🔒'}</button>
+                <input type={showPassword ? 'text' : 'password'} placeholder="Confirmer" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} style={{ flex: 1, padding: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '13px', boxSizing: 'border-box' }} />
+                <button onClick={() => setShowPassword(!showPassword)} style={{ padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer' }}>{showPassword ? '👁️' : '🔒'}</button>
               </div>
-              <button onClick={handleCreateCoffre} style={{ width: '100%', padding: '12px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', fontSize: '14px' }}>Créer le coffre</button>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={() => setAuthMode('choice')} style={{ flex: 1, padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', fontWeight: 500 }}>Retour</button>
+                <button onClick={handleCreateCoffre} style={{ flex: 2, padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 600, cursor: 'pointer' }}>Créer</button>
+              </div>
             </>
-          ) : (
+          )}
+
+          {authMode === 'access' && (
             <>
-              <h2 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '20px', color: '#2d3748' }}>{hasSharedCoffre ? 'Accéder au coffre partagé' : 'Accéder au coffre'}</h2>
+              <h2 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '16px', color: '#2d3748' }}>📂 Accéder à un coffre</h2>
+              <label style={{ display: 'block', fontSize: '12px', color: '#4a5568', marginBottom: '4px', fontWeight: 500 }}>ID du coffre</label>
+              <input placeholder="ex: bernabot-famille" value={accessCoffreId} onChange={e => { setAccessCoffreId(e.target.value); setAccessError(''); }} style={{ width: '100%', padding: '10px', border: `1px solid ${accessError ? '#f56565' : '#e2e8f0'}`, borderRadius: '8px', fontSize: '13px', boxSizing: 'border-box', marginBottom: '12px' }} />
+              
+              <label style={{ display: 'block', fontSize: '12px', color: '#4a5568', marginBottom: '4px', fontWeight: 500 }}>Mot de passe maître</label>
               <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-                <input type={showPassword ? 'text' : 'password'} placeholder="Mot de passe maître" value={passwordInput} onChange={e => { setPasswordInput(e.target.value); setAccessError(''); }} onKeyDown={e => e.key === 'Enter' && handleAccessCoffre()} style={{ flex: 1, padding: '12px', border: `1px solid ${accessError ? '#f56565' : '#e2e8f0'}`, borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' }} />
-                <button onClick={() => setShowPassword(!showPassword)} style={{ padding: '12px', background: '#edf2f7', border: `1px solid ${accessError ? '#f56565' : '#e2e8f0'}`, borderRadius: '8px', cursor: 'pointer' }}>{showPassword ? '👁️' : '🔒'}</button>
+                <input type={showPassword ? 'text' : 'password'} placeholder="Mot de passe" value={passwordInput} onChange={e => { setPasswordInput(e.target.value); setAccessError(''); }} onKeyDown={e => e.key === 'Enter' && handleAccessCoffre()} style={{ flex: 1, padding: '10px', border: `1px solid ${accessError ? '#f56565' : '#e2e8f0'}`, borderRadius: '8px', fontSize: '13px', boxSizing: 'border-box' }} />
+                <button onClick={() => setShowPassword(!showPassword)} style={{ padding: '10px', background: '#edf2f7', border: `1px solid ${accessError ? '#f56565' : '#e2e8f0'}`, borderRadius: '8px', cursor: 'pointer' }}>{showPassword ? '👁️' : '🔒'}</button>
               </div>
               {accessError && <p style={{ color: '#f56565', fontSize: '12px', marginBottom: '12px' }}>{accessError}</p>}
-              <button onClick={handleAccessCoffre} style={{ width: '100%', padding: '12px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', fontSize: '14px' }}>Accéder</button>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button onClick={() => { setAuthMode('choice'); setAccessError(''); }} style={{ flex: 1, padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', fontWeight: 500 }}>Retour</button>
+                <button onClick={handleAccessCoffre} style={{ flex: 2, padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 600, cursor: 'pointer' }}>Accéder</button>
+              </div>
             </>
           )}
         </div>
@@ -383,7 +484,7 @@ export default function App() {
     <div style={{ minHeight: '100vh', background: '#f7fafc', paddingBottom: '20px', fontFamily: 'system-ui' }}>
       <div style={{ background: 'linear-gradient(135deg,#667eea,#764ba2)', color: 'white', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div>
-          <h1 style={{ margin: '0', fontSize: '18px', fontWeight: 700 }}>🔐 Coffre Bernabot</h1>
+          <h1 style={{ margin: '0', fontSize: '18px', fontWeight: 700 }}>🔐 {shareId}</h1>
           {syncBadge.text && <span style={{ fontSize: '10px', color: syncBadge.color, background: 'rgba(255,255,255,0.9)', padding: '2px 6px', borderRadius: '4px', marginTop: '4px', display: 'inline-block' }}>{syncBadge.text}</span>}
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
@@ -397,28 +498,22 @@ export default function App() {
           <div style={{ background: 'white', borderRadius: '12px', padding: '20px', marginBottom: '20px', border: '1px solid #e2e8f0' }}>
             <h3 style={{ margin: '0 0 12px', fontSize: '14px', fontWeight: 600 }}>📱 Partager avec Julie</h3>
             <div style={{ background: '#f7fafc', padding: '16px', borderRadius: '8px' }}>
-              <p style={{ margin: '0 0 8px', fontSize: '11px', color: '#718096', fontWeight: 600 }}>Lien à partager :</p>
-              <p style={{ margin: '0 0 12px', fontSize: '11px', color: '#1a202c', wordBreak: 'break-all', background: 'white', padding: '8px', borderRadius: '4px', fontFamily: 'monospace' }}>{window.location.origin}/?share={shareId}</p>
-              <button onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/?share=${shareId}`); alert('Lien copié !'); }} style={{ padding: '8px 16px', background: '#667eea', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600 }}>📋 Copier le lien</button>
+              <p style={{ margin: '0 0 8px', fontSize: '12px', color: '#4a5568', fontWeight: 600 }}>Option 1 : Lien direct</p>
+              <p style={{ margin: '0 0 8px', fontSize: '11px', color: '#1a202c', wordBreak: 'break-all', background: 'white', padding: '8px', borderRadius: '4px', fontFamily: 'monospace' }}>{window.location.origin}/?share={shareId}</p>
+              <button onClick={() => { navigator.clipboard.writeText(`${window.location.origin}/?share=${shareId}`); alert('Lien copié !'); }} style={{ padding: '6px 12px', background: '#667eea', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 600, marginBottom: '12px' }}>📋 Copier lien</button>
+              
+              <p style={{ margin: '12px 0 8px', fontSize: '12px', color: '#4a5568', fontWeight: 600 }}>Option 2 : ID à taper</p>
+              <p style={{ margin: '0', fontSize: '12px', color: '#718096' }}>Julie va sur <strong>{window.location.origin}</strong>, choisit "Accéder à un coffre" et tape :</p>
+              <p style={{ margin: '8px 0 0', fontSize: '13px', color: '#1a202c', background: 'white', padding: '8px', borderRadius: '4px', fontFamily: 'monospace', fontWeight: 600 }}>{shareId}</p>
             </div>
-            <p style={{ margin: '12px 0 0', fontSize: '11px', color: '#718096' }}>Julie ouvre ce lien et entre le mot de passe maître</p>
+            <p style={{ margin: '12px 0 0', fontSize: '11px', color: '#718096' }}>+ le mot de passe maître (dans les deux cas)</p>
           </div>
         )}
 
-        {/* BARRE DE RECHERCHE */}
         {identifiants.length > 0 && (
           <div style={{ background: 'white', borderRadius: '12px', padding: '12px', marginBottom: '16px', border: '1px solid #e2e8f0', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-            <input 
-              placeholder="🔍 Rechercher..." 
-              value={searchQuery} 
-              onChange={e => setSearchQuery(e.target.value)}
-              style={{ flex: 1, minWidth: '150px', padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }}
-            />
-            <select 
-              value={filterCategory} 
-              onChange={e => setFilterCategory(e.target.value)}
-              style={{ padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', background: 'white', cursor: 'pointer' }}
-            >
+            <input placeholder="🔍 Rechercher..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} style={{ flex: 1, minWidth: '150px', padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+            <select value={filterCategory} onChange={e => setFilterCategory(e.target.value)} style={{ padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', background: 'white', cursor: 'pointer' }}>
               <option value="Toutes">Toutes catégories</option>
               {categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
@@ -486,49 +581,55 @@ export default function App() {
         )}
       </div>
 
-      {/* PARAMÈTRES AMÉLIORÉS */}
-      {showSettings && !showChangePassword && (
+      {showSettings && !showChangePassword && !showRenameCoffre && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => setShowSettings(false)}>
           <div style={{ background: 'white', borderRadius: '16px', padding: '30px', maxWidth: '400px', width: '90%' }} onClick={e => e.stopPropagation()}>
             <h2 style={{ margin: '0 0 20px', fontSize: '18px', fontWeight: 700 }}>⚙️ Paramètres</h2>
+            <p style={{ margin: '0 0 8px', fontSize: '13px', color: '#718096' }}><strong>Coffre :</strong> {shareId}</p>
             <p style={{ margin: '0 0 8px', fontSize: '13px', color: '#718096' }}><strong>Identifiants :</strong> {identifiants.length}</p>
-            <p style={{ margin: '0 0 8px', fontSize: '13px', color: '#718096' }}><strong>Catégories :</strong> {categories.length}</p>
-            <p style={{ margin: '0 0 20px', fontSize: '11px', color: '#a0aec0', wordBreak: 'break-all' }}><strong>Share ID :</strong> {shareId}</p>
+            <p style={{ margin: '0 0 20px', fontSize: '13px', color: '#718096' }}><strong>Catégories :</strong> {categories.length}</p>
             
-            <button onClick={() => syncFromRemote(shareId, masterPassword)} style={{ width: '100%', padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500 }}>
-              🔄 Forcer la synchronisation
-            </button>
-            
-            <button onClick={handleExport} style={{ width: '100%', padding: '10px', background: '#e6fffa', border: '1px solid #38b2ac', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500, color: '#234e52' }}>
-              💾 Exporter (backup chiffré)
-            </button>
-            
-            <button onClick={() => setShowChangePassword(true)} style={{ width: '100%', padding: '10px', background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500, color: '#78350f' }}>
-              🔑 Changer le mot de passe maître
-            </button>
-            
-            <button onClick={() => setShowSettings(false)} style={{ width: '100%', padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, marginTop: '8px' }}>
-              Fermer
-            </button>
+            <button onClick={() => syncFromRemote(shareId, masterPassword)} style={{ width: '100%', padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500 }}>🔄 Forcer la synchronisation</button>
+            <button onClick={handleExport} style={{ width: '100%', padding: '10px', background: '#e6fffa', border: '1px solid #38b2ac', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500, color: '#234e52' }}>💾 Exporter (backup chiffré)</button>
+            <button onClick={() => { setShowRenameCoffre(true); setNewCoffreIdRename(shareId); }} style={{ width: '100%', padding: '10px', background: '#e0e7ff', border: '1px solid #6366f1', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500, color: '#3730a3' }}>✏️ Renommer le coffre</button>
+            <button onClick={() => setShowChangePassword(true)} style={{ width: '100%', padding: '10px', background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '8px', cursor: 'pointer', marginBottom: '8px', fontWeight: 500, color: '#78350f' }}>🔑 Changer le mot de passe</button>
+            <button onClick={() => setShowSettings(false)} style={{ width: '100%', padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 600, marginTop: '8px' }}>Fermer</button>
           </div>
         </div>
       )}
 
-      {/* CHANGEMENT MOT DE PASSE */}
+      {showRenameCoffre && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => { setShowRenameCoffre(false); setRenameError(''); }}>
+          <div style={{ background: 'white', borderRadius: '16px', padding: '30px', maxWidth: '400px', width: '90%' }} onClick={e => e.stopPropagation()}>
+            <h2 style={{ margin: '0 0 20px', fontSize: '18px', fontWeight: 700 }}>✏️ Renommer le coffre</h2>
+            <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '8px', padding: '12px', marginBottom: '16px', fontSize: '12px', color: '#78350f' }}>
+              ⚠️ Julie devra utiliser le nouvel ID pour accéder au coffre depuis un nouvel appareil.
+            </div>
+            <label style={{ display: 'block', fontSize: '12px', color: '#4a5568', marginBottom: '4px', fontWeight: 500 }}>ID actuel : <strong>{shareId}</strong></label>
+            <label style={{ display: 'block', fontSize: '12px', color: '#4a5568', marginBottom: '4px', fontWeight: 500, marginTop: '12px' }}>Nouvel ID</label>
+            <input placeholder="ex: bernabot-famille" value={newCoffreIdRename} onChange={e => { setNewCoffreIdRename(e.target.value); setRenameError(''); }} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '4px', fontSize: '13px', boxSizing: 'border-box' }} />
+            <p style={{ margin: '0 0 12px', fontSize: '11px', color: '#a0aec0' }}>Lettres, chiffres, tirets. Min 3 caractères.</p>
+            {renameError && <p style={{ color: '#f56565', fontSize: '12px', marginBottom: '12px' }}>{renameError}</p>}
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={handleRenameCoffre} style={{ flex: 1, padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px' }}>Renommer</button>
+              <button onClick={() => { setShowRenameCoffre(false); setNewCoffreIdRename(''); setRenameError(''); }} style={{ flex: 1, padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>Annuler</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showChangePassword && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }} onClick={() => { setShowChangePassword(false); setChangePwdError(''); }}>
           <div style={{ background: 'white', borderRadius: '16px', padding: '30px', maxWidth: '400px', width: '90%' }} onClick={e => e.stopPropagation()}>
             <h2 style={{ margin: '0 0 20px', fontSize: '18px', fontWeight: 700 }}>🔑 Changer le mot de passe</h2>
-            <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '8px', padding: '12px', marginBottom: '16px', fontSize: '12px', color: '#78350f' }}>
-              ⚠️ Julie devra aussi utiliser le nouveau mot de passe pour accéder au coffre.
-            </div>
+            <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '8px', padding: '12px', marginBottom: '16px', fontSize: '12px', color: '#78350f' }}>⚠️ Julie devra aussi utiliser le nouveau mot de passe.</div>
             <input type="password" placeholder="Ancien mot de passe" value={oldPasswordCheck} onChange={e => setOldPasswordCheck(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '10px', fontSize: '13px', boxSizing: 'border-box' }} />
-            <input type="password" placeholder="Nouveau mot de passe (min 6)" value={newMasterPwd} onChange={e => setNewMasterPwd(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '10px', fontSize: '13px', boxSizing: 'border-box' }} />
-            <input type="password" placeholder="Confirmer le nouveau" value={confirmNewMasterPwd} onChange={e => setConfirmNewMasterPwd(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '12px', fontSize: '13px', boxSizing: 'border-box' }} />
+            <input type="password" placeholder="Nouveau (min 6)" value={newMasterPwd} onChange={e => setNewMasterPwd(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '10px', fontSize: '13px', boxSizing: 'border-box' }} />
+            <input type="password" placeholder="Confirmer" value={confirmNewMasterPwd} onChange={e => setConfirmNewMasterPwd(e.target.value)} style={{ width: '100%', padding: '10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '12px', fontSize: '13px', boxSizing: 'border-box' }} />
             {changePwdError && <p style={{ color: '#f56565', fontSize: '12px', marginBottom: '12px' }}>{changePwdError}</p>}
             <div style={{ display: 'flex', gap: '8px' }}>
-              <button onClick={handleChangePassword} style={{ flex: 1, padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 600, cursor: 'pointer', fontSize: '13px' }}>Valider</button>
-              <button onClick={() => { setShowChangePassword(false); setOldPasswordCheck(''); setNewMasterPwd(''); setConfirmNewMasterPwd(''); setChangePwdError(''); }} style={{ flex: 1, padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>Annuler</button>
+              <button onClick={handleChangePassword} style={{ flex: 1, padding: '10px', background: '#667eea', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 600, cursor: 'pointer' }}>Valider</button>
+              <button onClick={() => { setShowChangePassword(false); setOldPasswordCheck(''); setNewMasterPwd(''); setConfirmNewMasterPwd(''); setChangePwdError(''); }} style={{ flex: 1, padding: '10px', background: '#edf2f7', border: '1px solid #e2e8f0', borderRadius: '6px', cursor: 'pointer', fontWeight: 600 }}>Annuler</button>
             </div>
           </div>
         </div>
