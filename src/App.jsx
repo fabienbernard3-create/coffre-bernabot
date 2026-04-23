@@ -417,7 +417,7 @@ export default function App() {
         <div style={{ background: 'white', borderRadius: '16px', padding: '40px', width: '100%', maxWidth: '420px', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
           <div style={{ textAlign: 'center', marginBottom: '30px' }}>
             <div style={{ fontSize: '48px', marginBottom: '12px' }}>🔐</div>
-            <h1 style={{ margin: '0 0 8px', fontSize: '24px', fontWeight: 700, color: '#1a202c' }}>Coffre Bernabot ✨</h1>
+            <h1 style={{ margin: '0 0 8px', fontSize: '24px', fontWeight: 700, color: '#1a202c' }}>Coffre Bernabot</h1>
             <p style={{ margin: '0', fontSize: '13px', color: '#718096' }}>Chiffré AES-256 · Sync temps réel</p>
           </div>
 
